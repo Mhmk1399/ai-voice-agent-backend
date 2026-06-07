@@ -4,7 +4,7 @@ import {
   transcribeAudioChunks,
   processTranscript,
 } from "../agent/agent-orchestrator.js";
-import { synthesizeSpeech } from "../voice/tts.service.js";
+import { streamSpeech } from "../voice/tts.service.js";
 import { LatencyTracker } from "../voice/latency-tracker.js";
 import type { BookingDraft } from "../agent/types/booking.types.js";
 
@@ -28,7 +28,13 @@ type ClientMessage =
   | { type: "start_turn" }
   | { type: "audio_chunk"; audioBase64: string; mimeType: string; sequence: number }
   | { type: "end_turn" }
-  | { type: "end_session" };
+  | { type: "end_session" }
+  /**
+   * User started speaking while TTS is playing (barge-in).
+   * Server cancels the active TTS stream and acknowledges.
+   * Client auto-starts a new recording turn on receiving `barge_in_ack`.
+   */
+  | { type: "barge_in" };
 
 /**
  * Messages sent FROM the server TO the browser.
@@ -52,13 +58,28 @@ type ServerMessage =
       isReadyForConfirmation: boolean;
     }
   | { type: "latency"; sessionId: string; turnId: string; metrics: Record<string, number> }
+  /**
+   * One PCM audio chunk from the TTS stream.
+   * Format: 16-bit signed int, little-endian, mono, 24 000 Hz.
+   * The client decodes the base64 string to Int16Array, converts to Float32,
+   * and schedules it on a Web Audio API AudioBufferSourceNode.
+   * Chunks are sent in order (index 0, 1, 2 …) and must be played in order.
+   */
   | {
-      type: "tts_audio";
+      type: "tts_chunk";
       sessionId: string;
       turnId: string;
-      audioBase64: string;
-      mimeType: string;
+      index: number;
+      dataBase64: string;
+      /** Always 24000 — declared here so the client never has to hard-code it. */
+      sampleRate: 24000;
+      channels: 1;
+      encoding: "pcm_s16le";
     }
+  /** All TTS chunks for this turn have been sent. */
+  | { type: "tts_done"; sessionId: string; turnId: string }
+  /** Server confirmed the barge-in; client should immediately send start_turn. */
+  | { type: "barge_in_ack"; sessionId: string }
   | { type: "error"; message: string; details?: unknown };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -106,6 +127,13 @@ export async function voiceWebWsRoute(app: FastifyInstance) {
     app.log.info({ sessionId }, "Voice WebSocket connected — session created");
 
     send(socket, { type: "session_created", sessionId });
+
+    // ── TTS cancellation token ─────────────────────────────────────────────
+    // This object is shared between handleEndTurn (which streams TTS) and
+    // handleBargeIn (which sets .aborted to stop the stream).
+    // A new object is created at the start of each TTS generation so that a
+    // stale barge-in from a previous turn doesn't bleed into the next one.
+    let ttsCancel: { aborted: boolean } = { aborted: false };
 
     // ── Message handler ────────────────────────────────────────────────────
 
@@ -161,6 +189,8 @@ export async function voiceWebWsRoute(app: FastifyInstance) {
           return handleEndTurn();
         case "end_session":
           return handleEndSession();
+        case "barge_in":
+          return handleBargeIn();
         default: {
           // Exhaustiveness check — TypeScript will warn if a case is missed
           const _exhaustive: never = message;
@@ -310,22 +340,49 @@ export async function voiceWebWsRoute(app: FastifyInstance) {
         isReadyForConfirmation: result.isReadyForConfirmation,
       });
 
-      // ── TTS ────────────────────────────────────────────────────────────
+      // ── TTS streaming ──────────────────────────────────────────────────
+      //
+      // Why streaming?
+      //   Batch mode: server waits 3–5 s for full MP3 before sending anything.
+      //   Streaming:  first PCM chunk arrives at the client in ~200–400 ms.
+      //               The user hears the first word while the rest generates.
+      //
+      // Barge-in:
+      //   If the user starts speaking mid-response, handleBargeIn() sets
+      //   ttsCancel.aborted = true. The stream loop exits at the next chunk
+      //   boundary, cancelling the HTTP request to OpenAI to save bandwidth.
 
-      // TTS runs after the text response so the client can display the text
-      // immediately while audio is being generated.
+      ttsCancel = { aborted: false }; // fresh token for this turn
       latency.mark("tts_start");
-      try {
-        const tts = await synthesizeSpeech(result.message);
-        latency.mark("tts_end");
-        latency.measure("ttsMs", "tts_start", "tts_end");
 
-        send(socket, { type: "tts_audio", sessionId, turnId, ...tts });
+      try {
+        const { completed } = await streamSpeech({
+          text: result.message,
+          signal: ttsCancel,
+          onChunk: (data, index) => {
+            send(socket, {
+              type: "tts_chunk",
+              sessionId,
+              turnId,
+              index,
+              dataBase64: data.toString("base64"),
+              sampleRate: 24000,
+              channels: 1,
+              encoding: "pcm_s16le",
+            });
+          },
+        });
+
+        if (completed) {
+          send(socket, { type: "tts_done", sessionId, turnId });
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        // TTS failure is non-critical — the user still sees the text response
-        app.log.warn({ sessionId, turnId, error: msg }, "TTS failed (non-fatal)");
+        app.log.warn({ sessionId, turnId, error: msg }, "TTS stream failed (non-fatal)");
       }
+
+      latency.mark("tts_end");
+      latency.measure("ttsMs", "tts_start", "tts_end");
 
       // ── Latency report ──────────────────────────────────────────────────
 
@@ -345,6 +402,25 @@ export async function voiceWebWsRoute(app: FastifyInstance) {
         metrics,
         timestamp: Date.now(),
       });
+    }
+
+    // ── barge_in ───────────────────────────────────────────────────────────
+
+    /**
+     * User started speaking while the agent TTS response is playing.
+     *
+     * 1. Set the cancellation flag — the streamSpeech loop exits at the next
+     *    chunk boundary and cancels the OpenAI HTTP request.
+     * 2. Send `barge_in_ack` so the client can immediately start a new turn
+     *    without waiting for TTS to finish.
+     *
+     * The current turn's bookingDraft and history are preserved — barge-in
+     * only interrupts the audio, not the conversation state.
+     */
+    function handleBargeIn(): void {
+      ttsCancel.aborted = true;
+      app.log.info({ sessionId }, "Barge-in received — TTS stream cancelled");
+      send(socket, { type: "barge_in_ack", sessionId });
     }
 
     // ── end_session ────────────────────────────────────────────────────────

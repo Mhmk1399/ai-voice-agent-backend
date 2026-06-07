@@ -18,28 +18,79 @@ import type { BookingDraft, BookingAgentResult } from "./types/booking.types.js"
 /**
  * Fields that the AI extractor is responsible for.
  *
- * The deterministic resolver (entity-resolver.service.ts) handles offices and
- * categories. GPT only handles the fields that are genuinely hard to parse
- * deterministically: free-form dates, ages, names, phone numbers.
+ * ── Why .nullish() and not .optional()? ─────────────────────────────────────
+ * GPT sometimes returns null for fields it cannot fill, even when the schema
+ * only declares them as optional. z.string().optional() only accepts
+ * `string | undefined`; passing `null` throws a Zod error, which silently
+ * discards the entire response (because the catch block returns {}).
+ * .nullish() = string | null | undefined — it accepts whatever GPT sends.
+ * mergeBookingDraft already filters out null/undefined, so null values from
+ * GPT never pollute the booking draft.
  *
- * We still allow GPT to fill officeId/categoryId as a fallback if the resolver
- * found nothing — GPT may succeed on unusual phrasings the alias table misses.
+ * ── Why is selectedGear z.string().nullish() and not z.enum(…).nullish()? ───
+ * GPT occasionally returns "not specified" or "unknown" for enum fields.
+ * z.enum(["manual","automatic"]) would throw on those values, killing the
+ * whole parse. We accept any string and validate/filter downstream.
  */
 const AiExtractedSchema = z.object({
-  startDateText: z.string().optional(),
-  endDateText: z.string().optional(),
-  driverAge: z.number().optional(),
-  selectedGear: z.enum(["manual", "automatic"]).optional(),
-  customerPhone: z.string().optional(),
-  customerName: z.string().optional(),
+  startDateText: z.string().nullish(),
+  endDateText: z.string().nullish(),
+  driverAge: z.number().nullish(),
+  selectedGear: z.string().nullish(), // validated as GearType in mergeBookingDraft
+  customerPhone: z.string().nullish(),
+  customerName: z.string().nullish(),
   // Resolver fallbacks — GPT only fills these if resolver found nothing
-  officeId: z.string().optional(),
-  officeName: z.string().optional(),
-  categoryId: z.string().optional(),
-  categoryName: z.string().optional(),
+  officeId: z.string().nullish(),
+  officeName: z.string().nullish(),
+  categoryId: z.string().nullish(),
+  categoryName: z.string().nullish(),
 });
 
 type AiExtractedData = z.infer<typeof AiExtractedSchema>;
+
+/**
+ * Safe wrapper around the Zod schema.
+ * Returns whatever fields pass validation rather than throwing on the first
+ * field that doesn't match (which is what .parse() does).
+ */
+function parseAiResponse(raw: string): AiExtractedData {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+
+  const result = AiExtractedSchema.safeParse(parsed);
+
+  if (!result.success) {
+    // Log but do not crash. Partial extraction is better than nothing.
+    console.warn(
+      "[agent-orchestrator] GPT response failed Zod validation:",
+      JSON.stringify(result.error.issues)
+    );
+    // Fall back: extract known-safe string fields manually
+    const obj = parsed as Record<string, unknown>;
+    return {
+      startDateText: typeof obj.startDateText === "string" ? obj.startDateText : undefined,
+      endDateText: typeof obj.endDateText === "string" ? obj.endDateText : undefined,
+      driverAge: typeof obj.driverAge === "number" ? obj.driverAge : undefined,
+      customerPhone: typeof obj.customerPhone === "string" ? obj.customerPhone : undefined,
+      customerName: typeof obj.customerName === "string" ? obj.customerName : undefined,
+      officeId: typeof obj.officeId === "string" ? obj.officeId : undefined,
+      officeName: typeof obj.officeName === "string" ? obj.officeName : undefined,
+      categoryId: typeof obj.categoryId === "string" ? obj.categoryId : undefined,
+      categoryName: typeof obj.categoryName === "string" ? obj.categoryName : undefined,
+    };
+  }
+
+  // Coerce selectedGear: only accept the two valid values
+  const gear = result.data.selectedGear;
+  return {
+    ...result.data,
+    selectedGear: gear === "manual" || gear === "automatic" ? gear : undefined,
+  };
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Orchestrator result type
@@ -128,11 +179,25 @@ export async function processTranscript(params: {
   const needsAi = shouldCallAi(draft);
   if (needsAi) {
     latency.mark("ai_start");
-    const aiData = await runAiExtraction({ transcript, currentDraft: draft, context });
+    const aiData = await runAiExtraction({
+      transcript,
+      currentDraft: draft,
+      context,
+      // Pass recent turn history so GPT has conversation context.
+      // Limit to last 4 turns to keep prompt size predictable.
+      recentTurns: session.turns.slice(-4),
+    });
     latency.mark("ai_end");
     latency.measure("aiExtractionMs", "ai_start", "ai_end");
 
-    draft = mergeBookingDraft(draft, aiData);
+    // Strip null values before merging into the draft.
+    // AiExtractedData uses .nullish() so GPT can return null, but BookingDraft
+    // only accepts undefined. mergeBookingDraft already skips nulls at runtime;
+    // this cast satisfies TypeScript.
+    const cleanAiData = Object.fromEntries(
+      Object.entries(aiData).filter(([, v]) => v != null)
+    ) as Partial<BookingDraft>;
+    draft = mergeBookingDraft(draft, cleanAiData);
   }
 
   // Step 6: Validate and build response
@@ -204,75 +269,104 @@ async function runAiExtraction(params: {
   transcript: string;
   currentDraft: BookingDraft;
   context: Awaited<ReturnType<typeof getBookingContext>>;
+  recentTurns: import("../sessions/voice-session.types.js").TurnRecord[];
 }): Promise<AiExtractedData> {
-  const { transcript, currentDraft, context } = params;
+  const { transcript, currentDraft, context, recentTurns } = params;
 
-  // Compact context — only what GPT actually needs
-  const compactContext = {
-    offices: context.offices.map((o) => ({ id: o.id, name: o.name })),
-    categories: context.categories.map((c) => ({
-      id: c.id,
-      name: c.name,
-      purpose: c.purpose,
-    })),
-    // Tell GPT what is already known so it doesn't re-extract
-    knownDraft: {
-      officeId: currentDraft.officeId ?? null,
-      categoryId: currentDraft.categoryId ?? null,
-      startDateText: currentDraft.startDateText ?? null,
-      endDateText: currentDraft.endDateText ?? null,
-      driverAge: currentDraft.driverAge ?? null,
-    },
-  };
+  // ── Compact context ──────────────────────────────────────────────────────
+  // Only send IDs + names — do NOT send full pricing/schema to GPT.
+  // Keeps the prompt small = faster response + lower cost.
+  const officeList = context.offices.map((o) => ({ id: o.id, name: o.name }));
+  const categoryList = context.categories.map((c) => ({
+    id: c.id,
+    name: c.name,
+    purpose: c.purpose,
+  }));
 
+  // Only include ALREADY FILLED fields in knownDraft.
+  // Sending null values for unset fields confuses GPT — it sometimes returns
+  // null back for those fields, which was breaking Zod validation silently.
+  const knownDraft: Record<string, unknown> = {};
+  if (currentDraft.officeId) knownDraft.officeId = currentDraft.officeId;
+  if (currentDraft.officeName) knownDraft.officeName = currentDraft.officeName;
+  if (currentDraft.categoryId) knownDraft.categoryId = currentDraft.categoryId;
+  if (currentDraft.categoryName) knownDraft.categoryName = currentDraft.categoryName;
+  if (currentDraft.startDateText) knownDraft.startDateText = currentDraft.startDateText;
+  if (currentDraft.endDateText) knownDraft.endDateText = currentDraft.endDateText;
+  if (currentDraft.driverAge) knownDraft.driverAge = currentDraft.driverAge;
+
+  // ── Conversation history ─────────────────────────────────────────────────
+  // Pass the last few user transcripts so GPT has full context.
+  // E.g. if turn 1 set the office and turn 3 mentions a date, GPT should
+  // understand it's still the same booking.
+  const history = recentTurns.map((t) => ({
+    user: t.userTranscript,
+    agent: t.agentMessage,
+  }));
+
+  // ── System prompt ────────────────────────────────────────────────────────
+  // Today's date is critical for resolving relative dates like "tomorrow".
+  const today = new Date().toLocaleDateString("en-GB", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+
+  const systemPrompt = `You are a booking data extractor for a van rental phone agent.
+Today is ${today}.
+
+Your job: extract NEW booking information from the latest user message.
+Do NOT repeat information already in knownDraft.
+
+Return a JSON object with ONLY the fields you can confidently extract.
+Return {} if the message contains nothing new.
+
+Extractable fields:
+  startDateText  – pickup date/time. Use the exact words the user said.
+                   If they say "tomorrow at 5pm", output "tomorrow at 5pm".
+                   If they say "June 7th at 3pm", output "June 7th at 3pm".
+  endDateText    – return date/time. Same rule as above.
+  driverAge      – integer
+  selectedGear   – exactly "manual" or "automatic" (omit if not mentioned)
+  customerPhone  – as spoken
+  customerName   – full name
+  officeId       – ID from the office list (only if not already in knownDraft)
+  officeName     – matching name
+  categoryId     – ID from the category list (only if not already in knownDraft)
+  categoryName   – matching name
+
+Rules:
+  - NEVER output a field that is already in knownDraft.
+  - NEVER output null or empty string for any field — omit the field instead.
+  - Do NOT invent IDs. officeId/categoryId must come from the provided lists.
+  - Do NOT convert dates to ISO format. Keep the user's natural phrasing.
+  - Output valid JSON only. No explanation, no markdown.`;
+
+  // ── Call GPT ─────────────────────────────────────────────────────────────
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
     response_format: { type: "json_object" },
     messages: [
-      {
-        role: "system",
-        content: `You are a booking data extractor for a van rental phone agent.
-
-Extract ONLY the following fields from the user's message. Return a JSON object.
-
-Fields:
-  startDateText   – pickup date/time as the user said it (e.g. "tomorrow at 10am")
-  endDateText     – return date/time as the user said it
-  driverAge       – integer age
-  selectedGear    – "manual" or "automatic"
-  customerPhone   – phone number as a string
-  customerName    – full name
-  officeId        – must match an ID from the provided office list
-  officeName      – matching office name
-  categoryId      – must match an ID from the provided category list
-  categoryName    – matching category name
-
-Rules:
-  - Return only fields that are clearly present in the user's message.
-  - Return {} if nothing extractable is found.
-  - Do NOT overwrite fields that are already set in knownDraft.
-  - Do NOT invent office or category IDs — they must come from the lists.
-  - Keep date/time values as the user's natural language, not ISO format.
-  - Keep responses to valid JSON only. No explanation.`.trim(),
-      },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: JSON.stringify({ transcript, context: compactContext }),
+        content: JSON.stringify({
+          conversationHistory: history,
+          latestUserMessage: transcript,
+          knownDraft,
+          availableOffices: officeList,
+          availableCategories: categoryList,
+        }),
       },
     ],
   });
 
   const raw = response.choices[0]?.message?.content ?? "{}";
 
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return AiExtractedSchema.parse(parsed);
-  } catch {
-    // If GPT returns malformed JSON or fails Zod validation, return empty
-    // rather than crashing the turn. The missing fields will be asked next turn.
-    return {};
-  }
+  // parseAiResponse uses safeParse + manual fallback — never throws
+  return parseAiResponse(raw);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
