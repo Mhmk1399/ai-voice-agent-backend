@@ -91,6 +91,26 @@ export class VoiceSessionManager {
     return session;
   }
 
+  /**
+   * Load an existing session by ID, or create a new one if not found / expired.
+   *
+   * This is the preferred entry point for HTTP tool routes (e.g. POST
+   * /tools/process-booking-turn) where the caller may or may not have an
+   * existing sessionId. Callers should always pass the returned session's
+   * sessionId back on subsequent requests to continue the same conversation.
+   *
+   * @param sessionId - Optional. If provided, an attempt is made to load the
+   *   existing session. If the session is missing or expired, a new one is
+   *   created transparently (the caller should update its stored sessionId).
+   */
+  async getOrCreateSession(sessionId?: string): Promise<VoiceSession> {
+    if (sessionId) {
+      const existing = await this.getSession(sessionId);
+      if (existing) return existing;
+    }
+    return this.createSession();
+  }
+
   // ── Turn lifecycle ──────────────────────────────────────────────────────────
 
   /**
