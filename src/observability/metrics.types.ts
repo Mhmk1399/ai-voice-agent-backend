@@ -187,6 +187,7 @@ export interface TurnTrace {
   turnId: string;
   sessionId: string;
   input: string;
+  intent?: string;
   stateBefore: unknown;
   stateAfter: unknown;
   workflowStepBefore: string;
@@ -202,7 +203,7 @@ export interface TurnTrace {
     promptTokens: number;
     completionTokens: number;
     latencyMs: number;
-    purpose: "extraction" | "response";
+    purpose: "extraction" | "response" | "intent_classification";
     parseError?: string;
   }>;
   toolCalls: Array<{

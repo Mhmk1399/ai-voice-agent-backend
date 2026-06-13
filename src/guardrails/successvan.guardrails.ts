@@ -26,9 +26,23 @@ export const INVENTED_PRICE_GUARD = make(
   "INVENTED_PRICE_GUARD",
   "Block/rewrite responses that mention a price without a price preview.",
   (ctx): GuardrailResult => {
+    if (/£\s*calculating|price is calculating|total is calculating/i.test(ctx.response)) {
+      return {
+        guardrailId: "INVENTED_PRICE_GUARD",
+        passed: false,
+        blocked: true,
+        reason: "Response exposed a placeholder price.",
+        rewrite:
+          "I need valid pickup and return dates before I can calculate the price. What pickup and return date and time would you like?",
+      };
+    }
+
     const pricePattern = /£\s*\d+|\d+\s*(gbp|pounds?)/i;
     const hasPriceRef = pricePattern.test(ctx.response);
     if (!hasPriceRef || ctx.draft.pricePreview != null) {
+      return { guardrailId: "INVENTED_PRICE_GUARD", passed: true, blocked: false };
+    }
+    if (isAllowedContextPrice(ctx)) {
       return { guardrailId: "INVENTED_PRICE_GUARD", passed: true, blocked: false };
     }
     return {
@@ -41,6 +55,34 @@ export const INVENTED_PRICE_GUARD = make(
     };
   }
 );
+
+function isAllowedContextPrice(ctx: SuccessVanGuardrailContext): boolean {
+  const lower = ctx.response.toLowerCase();
+  const claimsFinalRentalPrice =
+    lower.includes("estimated total") ||
+    lower.includes("total is") ||
+    lower.includes("total:") ||
+    lower.includes("rental price") ||
+    lower.includes("booking price") ||
+    lower.includes("quote is") ||
+    lower.includes("price is");
+
+  if (claimsFinalRentalPrice) return false;
+
+  const mentionsKnownAddOn = ctx.context.addOns.some((addOn) =>
+    addOn.name && lower.includes(addOn.name.toLowerCase())
+  );
+  const mentionsPolicyFee =
+    lower.includes("add-on") ||
+    lower.includes("available add-ons") ||
+    lower.includes("extension") ||
+    lower.includes("special day") ||
+    lower.includes("special-day") ||
+    lower.includes("automatic gear") ||
+    lower.includes("charge:");
+
+  return mentionsKnownAddOn || mentionsPolicyFee;
+}
 
 // ── Invented office guard ─────────────────────────────────────────────────────
 
@@ -111,6 +153,54 @@ export const RESERVATION_WITHOUT_CONFIRMATION_GUARD = make(
   }
 );
 
+// ── Real SuccessVan workflow guard ───────────────────────────────────────────
+
+export const SUCCESSVAN_WORKFLOW_COMPLETENESS_GUARD = make(
+  "SUCCESSVAN_WORKFLOW_COMPLETENESS_GUARD",
+  "Block responses claiming reservation readiness before real SuccessVan steps are complete.",
+  (ctx): GuardrailResult => {
+    const lower = ctx.response.toLowerCase();
+    const claimsReady =
+      lower.includes("booking request is ready") ||
+      lower.includes("reservation is ready") ||
+      lower.includes("prepare the pending") ||
+      lower.includes("all required details are collected") ||
+      lower.includes("booking details are confirmed");
+
+    if (!claimsReady) {
+      return {
+        guardrailId: "SUCCESSVAN_WORKFLOW_COMPLETENESS_GUARD",
+        passed: true,
+        blocked: false,
+      };
+    }
+
+    const missing: string[] = [];
+    if (!ctx.draft.addOnsConfirmed) missing.push("add-ons accepted or skipped");
+    if (!ctx.draft.pricePreview) missing.push("final price calculated");
+    if (!ctx.draft.confirmed) missing.push("customer confirmation");
+    if (!ctx.draft.customerName || !ctx.draft.customerPhone) missing.push("customer name and phone");
+    if (!ctx.draft.customerVerified) missing.push("phone verification");
+    if (!ctx.draft.termsAccepted) missing.push("terms acceptance");
+
+    if (missing.length === 0) {
+      return {
+        guardrailId: "SUCCESSVAN_WORKFLOW_COMPLETENESS_GUARD",
+        passed: true,
+        blocked: false,
+      };
+    }
+
+    return {
+      guardrailId: "SUCCESSVAN_WORKFLOW_COMPLETENESS_GUARD",
+      passed: false,
+      blocked: true,
+      reason: `Missing required SuccessVan steps: ${missing.join(", ")}`,
+      rewrite: `Before I can prepare the pending reservation, I still need: ${missing.join(", ")}.`,
+    };
+  }
+);
+
 // ── Multiple questions guard ──────────────────────────────────────────────────
 
 export const MULTIPLE_QUESTIONS_GUARD = make(
@@ -141,5 +231,6 @@ export const successVanGuardrails: Guardrail<SuccessVanGuardrailContext>[] = [
   INVENTED_PRICE_GUARD,
   INVENTED_OFFICE_GUARD,
   RESERVATION_WITHOUT_CONFIRMATION_GUARD,
+  SUCCESSVAN_WORKFLOW_COMPLETENESS_GUARD,
   MULTIPLE_QUESTIONS_GUARD,
 ];

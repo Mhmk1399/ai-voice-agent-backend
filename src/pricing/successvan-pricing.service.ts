@@ -1,5 +1,7 @@
 import type { CategoryContext, BusinessContext } from "../context/context-provider.interface.js";
 import type { PricePreview, BookingDraftAddOn } from "../state/booking-draft.types.js";
+import { checkOfficeTimePolicy } from "../time/successvan-time-slot.service.js";
+import { formatLondonTime, getLondonDateParts } from "../utils/london-time.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SuccessVan Pricing Service
@@ -8,6 +10,7 @@ import type { PricePreview, BookingDraftAddOn } from "../state/booking-draft.typ
 
 export interface PricingInput {
   category: CategoryContext;
+  officeId?: string;
   pickupDateISO: string;
   returnDateISO: string;
   selectedGear?: "manual" | "automatic";
@@ -102,7 +105,8 @@ function calculateAddOnsPrice(
       const tierIndex = selectedAddOn.selectedTierIndex ?? 0;
       const tier = (addOnDef.tieredPrice as any).tiers?.[tierIndex];
       if (tier) {
-        const unitPrice = tier.isPerDay ? tier.price * days : tier.price;
+        const isPerDay = tier.isPerDay ?? (addOnDef.tieredPrice as any).isPerDay ?? false;
+        const unitPrice = isPerDay ? tier.price * days : tier.price;
         total += unitPrice * selectedAddOn.quantity;
       }
     }
@@ -111,16 +115,119 @@ function calculateAddOnsPrice(
   return total;
 }
 
+function calculateSpecialDaysPrice(
+  officeId: string | undefined,
+  pickupDateISO: string,
+  returnDateISO: string,
+  context?: BusinessContext
+): number {
+  if (!officeId || !context) return 0;
+  const office = context.offices.find((o) => o.id === officeId);
+  const specialDays = office?.specialDays ?? [];
+  if (specialDays.length === 0) return 0;
+
+  const start = new Date(pickupDateISO);
+  const end = new Date(returnDateISO);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
+
+  let total = 0;
+  const current = new Date(start);
+  current.setHours(0, 0, 0, 0);
+  const endDay = new Date(end);
+  endDay.setHours(0, 0, 0, 0);
+
+  while (current <= endDay) {
+    const { month, day } = getLondonDateParts(current);
+    const specialDay = specialDays.find((sd) => sd.month === month && sd.day === day);
+    if (specialDay?.isOpen && specialDay.extraPrice && specialDay.extraPrice > 0) {
+      total += specialDay.extraPrice;
+    }
+    current.setDate(current.getDate() + 1);
+  }
+
+  return total;
+}
+
+function calculateOfficeExtensionPrices(
+  officeId: string | undefined,
+  pickupDateISO: string,
+  returnDateISO: string,
+  context?: BusinessContext
+): { pickupExtensionPrice: number; returnExtensionPrice: number } {
+  if (!officeId || !context) {
+    return { pickupExtensionPrice: 0, returnExtensionPrice: 0 };
+  }
+
+  const office = context.offices.find((o) => o.id === officeId);
+  if (!office) {
+    return { pickupExtensionPrice: 0, returnExtensionPrice: 0 };
+  }
+
+  const pickup = new Date(pickupDateISO);
+  const ret = new Date(returnDateISO);
+  if (isNaN(pickup.getTime()) || isNaN(ret.getTime())) {
+    return { pickupExtensionPrice: 0, returnExtensionPrice: 0 };
+  }
+
+  const pickupDate = new Date(pickup);
+  pickupDate.setHours(0, 0, 0, 0);
+  const returnDate = new Date(ret);
+  returnDate.setHours(0, 0, 0, 0);
+
+  const pickupSpecial = findSpecialDay(office.specialDays ?? [], pickupDate);
+  const returnSpecial = findSpecialDay(office.specialDays ?? [], returnDate);
+  const sameSpecialDay =
+    Boolean(
+      pickupSpecial?.isOpen &&
+      returnSpecial?.isOpen &&
+      pickupSpecial.month === returnSpecial.month &&
+      pickupSpecial.day === returnSpecial.day &&
+      pickupDate.getTime() === returnDate.getTime()
+    );
+
+  let pickupExtensionPrice = 0;
+  let returnExtensionPrice = 0;
+
+  if (pickupSpecial?.isOpen) {
+    pickupExtensionPrice = pickupSpecial.extraPrice ?? 0;
+  } else {
+    const pickupPolicy = checkOfficeTimePolicy(pickup, toTime(pickup), office, "pickup");
+    pickupExtensionPrice = pickupPolicy.extensionPrice;
+  }
+
+  if (returnSpecial?.isOpen) {
+    returnExtensionPrice = sameSpecialDay ? 0 : returnSpecial.extraPrice ?? 0;
+  } else {
+    const returnPolicy = checkOfficeTimePolicy(ret, toTime(ret), office, "return");
+    returnExtensionPrice = returnPolicy.extensionPrice;
+  }
+
+  return { pickupExtensionPrice, returnExtensionPrice };
+}
+
+function toTime(date: Date): string {
+  return formatLondonTime(date);
+}
+
+function findSpecialDay(
+  specialDays: NonNullable<BusinessContext["offices"][number]["specialDays"]>,
+  date: Date
+) {
+  const { month, day } = getLondonDateParts(date);
+  return specialDays.find((sd) => sd.month === month && sd.day === day);
+}
+
 /** Main pricing calculation. Returns null if dates are invalid. */
 export function calculatePrice(input: PricingInput): PricePreview | null {
   const {
     category,
+    officeId,
     pickupDateISO,
     returnDateISO,
     selectedGear,
     addOns = [],
-    pickupExtensionPrice = 0,
-    returnExtensionPrice = 0,
+    pickupExtensionPrice,
+    returnExtensionPrice,
     context,
   } = input;
 
@@ -150,14 +257,31 @@ export function calculatePrice(input: PricingInput): PricePreview | null {
 
   // Add-ons
   const addOnsPrice = calculateAddOnsPrice(addOns, fullDays, context);
+  const extensionPrices = calculateOfficeExtensionPrices(
+    officeId,
+    pickupDateISO,
+    returnDateISO,
+    context
+  );
+  const finalPickupExtensionPrice =
+    pickupExtensionPrice ?? extensionPrices.pickupExtensionPrice;
+  const finalReturnExtensionPrice =
+    returnExtensionPrice ?? extensionPrices.returnExtensionPrice;
+  const specialDaysPrice = calculateSpecialDaysPrice(
+    officeId,
+    pickupDateISO,
+    returnDateISO,
+    context
+  );
 
   const totalPrice =
     fullDays * pricePerDay +
     fullDays * gearExtraCost +
     extraHours * extraHourRate +
-    pickupExtensionPrice +
-    returnExtensionPrice +
-    addOnsPrice;
+    finalPickupExtensionPrice +
+    finalReturnExtensionPrice +
+    addOnsPrice +
+    specialDaysPrice;
 
   const roundedTotal = Math.round(totalPrice * 100) / 100;
 
@@ -168,11 +292,12 @@ export function calculatePrice(input: PricingInput): PricePreview | null {
     parts.push(`automatic gear: £${(fullDays * gearExtraCost).toFixed(2)}`);
   if (extraHours > 0)
     parts.push(`${extraHours} extra hour${extraHours !== 1 ? "s" : ""} × £${extraHourRate.toFixed(2)}`);
-  if (pickupExtensionPrice > 0)
-    parts.push(`pickup extension: £${pickupExtensionPrice.toFixed(2)}`);
-  if (returnExtensionPrice > 0)
-    parts.push(`return extension: £${returnExtensionPrice.toFixed(2)}`);
+  if (finalPickupExtensionPrice > 0)
+    parts.push(`pickup extension: £${finalPickupExtensionPrice.toFixed(2)}`);
+  if (finalReturnExtensionPrice > 0)
+    parts.push(`return extension: £${finalReturnExtensionPrice.toFixed(2)}`);
   if (addOnsPrice > 0) parts.push(`add-ons: £${addOnsPrice.toFixed(2)}`);
+  if (specialDaysPrice > 0) parts.push(`special days: £${specialDaysPrice.toFixed(2)}`);
 
   return {
     totalPrice: roundedTotal,
@@ -181,9 +306,10 @@ export function calculatePrice(input: PricingInput): PricePreview | null {
     extraHours,
     pricePerDay: Math.round(pricePerDay * 100) / 100,
     gearExtraCost: Math.round(gearExtraCost * fullDays * 100) / 100,
-    pickupExtensionPrice,
-    returnExtensionPrice,
+    pickupExtensionPrice: Math.round(finalPickupExtensionPrice * 100) / 100,
+    returnExtensionPrice: Math.round(finalReturnExtensionPrice * 100) / 100,
     addOnsPrice: Math.round(addOnsPrice * 100) / 100,
+    specialDaysPrice: Math.round(specialDaysPrice * 100) / 100,
     explanation: parts.join(" + "),
   };
 }

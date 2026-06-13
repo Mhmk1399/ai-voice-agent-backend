@@ -6,6 +6,7 @@ import type { BookingDraftAddOn } from "../../state/booking-draft.types.js";
 
 interface CalculatePriceInput {
   categoryId: string;
+  officeId?: string;
   pickupDateISO: string;
   returnDateISO: string;
   selectedGear?: "manual" | "automatic";
@@ -27,6 +28,7 @@ export const calculatePriceTool: Tool<CalculatePriceInput, PricePreview | null> 
 
     const preview = calculatePrice({
       category,
+      officeId: input.officeId,
       pickupDateISO: input.pickupDateISO,
       returnDateISO: input.returnDateISO,
       selectedGear: input.selectedGear,

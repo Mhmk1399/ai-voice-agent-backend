@@ -22,9 +22,9 @@ export interface WorkflowRunResult {
 export function runWorkflow(
   draft: BookingDraft,
   workflowState: WorkflowState,
-  _context: BusinessContext
+  context: BusinessContext
 ): WorkflowRunResult {
-  const transition = determineNextStep(draft, workflowState);
+  const transition = determineNextStep(draft, workflowState, context);
   const nextStep = transition.nextStep;
 
   const isTerminal =

@@ -84,11 +84,15 @@ const STEP_ORDER: Record<string, number> = {
   collect_return_datetime: 4,
   collect_driver_age: 5,
   resolve_ambiguity: 3.5,
-  price_preview: 6,
-  confirmation: 7,
-  ready_for_reservation: 8,
-  completed: 9,
-  human_handoff: 10,
+  collect_gear: 6,
+  collect_add_ons: 7,
+  price_preview: 8,
+  confirmation: 9,
+  verify_customer: 10,
+  accept_terms: 11,
+  ready_for_pending_reservation: 12,
+  completed: 13,
+  human_handoff: 14,
 };
 
 function getStepIndex(step: string): number {

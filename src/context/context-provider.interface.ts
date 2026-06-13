@@ -22,10 +22,17 @@ export interface WorkingDay {
 }
 
 export interface TimeExtension {
-  enabled: boolean;
+  enabled?: boolean;
+  hoursBefore?: number;
+  hoursAfter?: number;
   startTime?: string;
   endTime?: string;
   flatPrice?: number;
+}
+
+export interface TimeWindow {
+  startTime: string;
+  endTime: string;
 }
 
 export interface SpecialDay {
@@ -34,10 +41,11 @@ export interface SpecialDay {
   isOpen: boolean;
   startTime?: string;
   endTime?: string;
-  pickupTime?: string;
-  returnTime?: string;
+  pickupTime?: TimeWindow;
+  returnTime?: TimeWindow;
   pickupExtension?: TimeExtension;
   returnExtension?: TimeExtension;
+  reason?: string;
   extraPrice?: number;
 }
 
@@ -81,7 +89,8 @@ export interface AddOnContext {
     isPerDay: boolean;
   };
   tieredPrice?: {
-    tiers: Array<{ label: string; price: number; isPerDay: boolean }>;
+    isPerDay?: boolean;
+    tiers: Array<{ label: string; price: number; isPerDay?: boolean }>;
   };
   status: string;
 }

@@ -85,10 +85,35 @@ export function extractGear(text: string): "manual" | "automatic" | null {
   return null;
 }
 
-/** Detect a UK phone number pattern (10 digits after stripping spaces/dashes). */
+/** Extract email address from text. */
+export function extractEmail(text: string): string | null {
+  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0] ?? null;
+}
+
+/** Extract simple spoken customer name patterns. */
+export function extractCustomerName(text: string): string | null {
+  const match = text.match(
+    /\b(?:i am|i'm|im|my name is|name is|name)\s+([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\b/i
+  );
+  if (!match) return null;
+
+  const raw = match[1]
+    .replace(/\b(?:phone|phonenumber|phone number|email|and|please)\b.*$/i, "")
+    .trim();
+
+  return raw.length > 0 ? raw : null;
+}
+
+/**
+ * Extract SuccessVan customer phone input format.
+ * The web app stores local UK numbers as 10 digits without +44, e.g. 7346323799.
+ */
 export function extractUkPhone(text: string): string | null {
   const digits = text.replace(/\D/g, "");
-  if (digits.length === 10 && digits.startsWith("0")) return digits;
-  if (digits.length === 12 && digits.startsWith("440")) return "0" + digits.slice(3);
+  if (digits.length === 10) return digits;
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  if (digits.length === 12 && digits.startsWith("44")) return digits.slice(2);
+  if (digits.length === 13 && digits.startsWith("440")) return digits.slice(3);
   return null;
 }

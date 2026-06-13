@@ -17,6 +17,7 @@ export interface PricePreview {
   pickupExtensionPrice: number;
   returnExtensionPrice: number;
   addOnsPrice: number;
+  specialDaysPrice?: number;
   explanation: string;
 }
 
@@ -56,13 +57,19 @@ export interface BookingDraft {
 
   // Gear resolution: set after driver age collected
   requiresGearSelection?: boolean;
+  gearConfirmed?: boolean;
 
   // Add-ons (collected after price preview)
   addOns?: BookingDraftAddOn[];
+  addOnsOffered?: boolean;
+  addOnsConfirmed?: boolean;
 
   // Customer info (collected at confirmation stage)
   customerPhone?: string;
   customerName?: string;
+  customerEmail?: string;
+  customerVerified?: boolean;
+  termsAccepted?: boolean;
 
   // Price preview (populated by calculatePricePreview tool)
   pricePreview?: PricePreview;
@@ -108,7 +115,13 @@ export function isDraftReadyForConfirmation(draft: BookingDraft): boolean {
 
 export function isDraftReadyForReservation(draft: BookingDraft): boolean {
   return (
-    isDraftReadyForConfirmation(draft) &&
-    draft.confirmed === true
+    getMissingFields(draft).length === 0 &&
+    draft.pricePreview != null &&
+    draft.addOnsConfirmed === true &&
+    draft.confirmed === true &&
+    draft.customerName != null &&
+    draft.customerPhone != null &&
+    draft.customerVerified === true &&
+    draft.termsAccepted === true
   );
 }

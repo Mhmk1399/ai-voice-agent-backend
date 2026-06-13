@@ -40,6 +40,18 @@ export function validateReservationPayload(
   if (!draft.driverAge) {
     errors.push({ field: "driverAge", message: "Driver age is required." });
   }
+  if (!draft.addOnsConfirmed) {
+    errors.push({
+      field: "addOnsConfirmed",
+      message: "Add-ons must be offered and accepted or skipped.",
+    });
+  }
+  if (!draft.pricePreview) {
+    errors.push({
+      field: "pricePreview",
+      message: "Final price must be calculated after add-ons and gear.",
+    });
+  }
 
   // Confirm dates parse correctly
   let pickupDate: Date | null = null;
@@ -106,20 +118,7 @@ export function validateReservationPayload(
     }
   }
 
-  // Same-day 6-hour minimum (customer only)
-  if (!isAdminMode && pickupDate && returnDate) {
-    const sameDay = pickupDate.toDateString() === returnDate.toDateString();
-    if (sameDay) {
-      const durationHours =
-        (returnDate.getTime() - pickupDate.getTime()) / 3_600_000;
-      if (durationHours < 6) {
-        errors.push({
-          field: "returnDateISO",
-          message: `Same-day rentals must be at least 6 hours (selected: ${durationHours.toFixed(1)}h).`,
-        });
-      }
-    }
-  }
+  // Short rentals are allowed. Pricing bills anything under 24 hours as one day.
 
   // Confirmation
   if (!draft.confirmed) {
@@ -138,12 +137,24 @@ export function validateReservationPayload(
       errors.push({ field: "customerPhone", message: "Customer phone is required." });
     } else {
       const digits = draft.customerPhone.replace(/\D/g, "");
-      if (digits.length !== 10 || !digits.startsWith("0")) {
+      if (digits.length !== 10) {
         errors.push({
           field: "customerPhone",
-          message: "Phone must be a 10-digit UK number starting with 0.",
+          message: "Phone must be a 10-digit UK number without +44.",
         });
       }
+    }
+    if (!draft.customerVerified) {
+      errors.push({
+        field: "customerVerified",
+        message: "Customer phone verification is required.",
+      });
+    }
+    if (!draft.termsAccepted) {
+      errors.push({
+        field: "termsAccepted",
+        message: "Customer must accept the terms and conditions.",
+      });
     }
   }
 
@@ -167,9 +178,9 @@ export function buildReservationPayload(
       userId,
       name: customerName,
       lastName: customerLastName,
-      email: customerEmail,
+      email: customerEmail || draft.customerEmail,
       phoneNumber: draft.customerPhone
-        ? `+44${draft.customerPhone.replace(/^0/, "")}`
+        ? `+44${draft.customerPhone}`
         : undefined,
     },
     reservationData: {

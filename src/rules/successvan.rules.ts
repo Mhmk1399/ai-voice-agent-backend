@@ -128,6 +128,42 @@ export const REQUIRE_PICKUP_AND_RETURN = make(
   () => "Pickup and return dates are both required."
 );
 
+export const REQUIRE_GEAR_DECISION = make(
+  "REQUIRE_GEAR_DECISION",
+  "soft",
+  "If the selected category supports manual and automatic, gearbox must be selected before price preview.",
+  (ctx) => {
+    if (ctx.draft.pricePreview == null) return true;
+    const category = ctx.context.categories.find((c) => c.id === ctx.draft.categoryId);
+    const types = category?.gear?.availableTypes ?? [];
+    const needsGear = types.includes("manual") && types.includes("automatic");
+    return !needsGear || ctx.draft.selectedGear != null;
+  },
+  () => "Gearbox must be selected before showing the final price."
+);
+
+export const REQUIRE_ADD_ON_DECISION_BEFORE_PRICE = make(
+  "REQUIRE_ADD_ON_DECISION_BEFORE_PRICE",
+  "hard",
+  "Add-ons must be offered and accepted/skipped before the final price is calculated.",
+  (ctx) => {
+    if (ctx.draft.pricePreview == null) return true;
+    return ctx.draft.addOnsOffered === true && ctx.draft.addOnsConfirmed === true;
+  },
+  () => "Add-ons must be offered and accepted or skipped before price preview."
+);
+
+export const REQUIRE_VERIFICATION_AND_TERMS = make(
+  "REQUIRE_VERIFICATION_AND_TERMS",
+  "hard",
+  "Ready reservation requires customer verification and accepted terms.",
+  (ctx) => {
+    if (ctx.draft.readyForReservation !== true) return true;
+    return ctx.draft.customerVerified === true && ctx.draft.termsAccepted === true;
+  },
+  () => "Customer verification and terms acceptance are required before ready reservation."
+);
+
 export const HUMAN_HANDOFF_ON_USER_REQUEST = make(
   "HUMAN_HANDOFF_ON_USER_REQUEST",
   "hard",
@@ -146,5 +182,8 @@ export const successVanConversationRules: Rule<ConversationRuleContext>[] = [
   REQUIRE_OFFICE,
   REQUIRE_CATEGORY,
   REQUIRE_PICKUP_AND_RETURN,
+  REQUIRE_GEAR_DECISION,
+  REQUIRE_ADD_ON_DECISION_BEFORE_PRICE,
+  REQUIRE_VERIFICATION_AND_TERMS,
   HUMAN_HANDOFF_ON_USER_REQUEST,
 ];

@@ -28,7 +28,7 @@ export class SuccessVanContextProvider implements ContextProvider {
         .lean<Record<string, unknown>[]>(),
       CategoryModel.find({ status: "active" })
         .select(
-          "name description purpose status office type showPrice selloffer extraHourRate pricingTiers gear seats fuel"
+          "name description purpose status office type showPrice selloffer extrahoursRate extraHourRate pricingTiers gear seats fuel"
         )
         .lean<Record<string, unknown>[]>(),
       AddOnModel.find({ status: "active" })
@@ -67,7 +67,9 @@ export class SuccessVanContextProvider implements ContextProvider {
         showPrice: typeof c.showPrice === "number" ? c.showPrice : undefined,
         selloffer: typeof c.selloffer === "number" ? c.selloffer : undefined,
         extraHourRate:
-          typeof (c as any).extraHourRate === "number"
+          typeof (c as any).extrahoursRate === "number"
+            ? (c as any).extrahoursRate
+            : typeof (c as any).extraHourRate === "number"
             ? (c as any).extraHourRate
             : undefined,
         pricingTiers: Array.isArray(c.pricingTiers)

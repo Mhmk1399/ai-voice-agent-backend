@@ -69,37 +69,16 @@ export const CUSTOMER_LEAD_TIME_RULE: Rule<ReservationRuleContext> = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Same-day 6-hour minimum (customer only)
+// Short-rental pricing
+// Less than 24 hours is allowed and billed as one full day by pricing.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SAME_DAY_MIN_DURATION_RULE: Rule<ReservationRuleContext> = {
   id: "SAME_DAY_MIN_DURATION",
-  severity: "hard",
-  description: "Customer same-day rentals must be at least 6 hours.",
+  severity: "soft",
+  description: "Short rentals are allowed and billed as one full day.",
   check(ctx): RuleResult {
-    if (ctx.isAdminMode) return getRuleResult(this.id, this.severity, true);
-
-    const pickup = ctx.draft.pickupDateISO
-      ? new Date(ctx.draft.pickupDateISO)
-      : null;
-    const ret = ctx.draft.returnDateISO
-      ? new Date(ctx.draft.returnDateISO)
-      : null;
-
-    if (!pickup || !ret) return getRuleResult(this.id, this.severity, true);
-
-    const sameDay =
-      pickup.toDateString() === ret.toDateString();
-    if (!sameDay) return getRuleResult(this.id, this.severity, true);
-
-    const durationHours = (ret.getTime() - pickup.getTime()) / 3_600_000;
-    const passed = durationHours >= 6;
-    return getRuleResult(
-      this.id,
-      this.severity,
-      passed,
-      `Same-day rentals must be at least 6 hours (selected: ${durationHours.toFixed(1)}h).`
-    );
+    return getRuleResult(this.id, this.severity, true);
   },
 };
 
@@ -169,17 +148,17 @@ export const AUTHENTICATION_REQUIRED_RULE: Rule<ReservationRuleContext> = {
 export const PHONE_FORMAT_RULE: Rule<ReservationRuleContext> = {
   id: "PHONE_FORMAT",
   severity: "hard",
-  description: "Customer phone must be a 10-digit UK local number.",
+  description: "Customer phone must be SuccessVan's 10-digit UK local format without +44.",
   check(ctx): RuleResult {
     const phone = ctx.draft.customerPhone;
     if (!phone) return getRuleResult(this.id, this.severity, true);
     const digits = phone.replace(/\D/g, "");
-    const passed = digits.length === 10 && digits.startsWith("0");
+    const passed = digits.length === 10;
     return getRuleResult(
       this.id,
       this.severity,
       passed,
-      `Phone number must be a 10-digit UK number starting with 0 (got: ${phone}).`
+      `Phone number must be a 10-digit UK number without +44 (got: ${phone}).`
     );
   },
 };

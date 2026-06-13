@@ -49,6 +49,22 @@ function scoreCategory(cat: CategoryContext, normInput: string): number {
 
   if (normName === normInput) return 100;
 
+  if (normInput.includes("short") && normInput.includes("base")) {
+    if (normName.includes("short") && normName.includes("base")) return 92;
+  }
+  if (normInput.includes("long") && normInput.includes("base")) {
+    if (normName.includes("long") && normName.includes("base")) return 88;
+  }
+  const seatCount = normInput.match(/\b(8|9|14|17)\b/)?.[1];
+  if (
+    seatCount &&
+    (normInput.includes("seat") || normInput.includes("seater")) &&
+    normName.includes(seatCount) &&
+    (normName.includes("seat") || normName.includes("seater"))
+  ) {
+    return 92;
+  }
+
   const aliasPatterns = CATEGORY_ALIASES[normInput];
   if (aliasPatterns) {
     const combined = normName + " " + normPurpose;
